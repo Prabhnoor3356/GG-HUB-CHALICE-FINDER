@@ -1,6 +1,6 @@
 -- [[ GG HUB v21: FULL FEATURED PREMIUM ]] --
 (function()
-    -- Combat Framework (Stolen from premium scripts)
+    -- Combat Framework (gg)
     local CombatFramework = require(game:GetService("Players").LocalPlayer.PlayerScripts:WaitForChild("CombatFramework"))
     local CombatFrameworkR = getupvalues(CombatFramework)[2]
     local RigController = require(game:GetService("Players").LocalPlayer.PlayerScripts.CombatFramework.RigController)
