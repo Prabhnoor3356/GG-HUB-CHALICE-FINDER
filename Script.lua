@@ -1,20 +1,19 @@
--- [[ GG HUB v26: GHOST AUTOMATION ]] --
+-- [[ GG HUB v32: PERFORMANCE & PHYSICS STABLE ]] --
 (function()
+    local function cleanup(name)
+        local existing = game:GetService("CoreGui"):FindFirstChild(name)
+        if existing then existing:Destroy() end
+    end
+    cleanup("GG_HUB_V32")
+
     local GG = {
-        State = {
-            Enabled = false,
-            FastAttack = false,
-            BringMob = false,
-            AutoFarmLevel = false,
-            IsBusy = false,
-            TargetItem = (game.PlaceId == 2753915549) and "God's Chalice" or "Fist of Darkness"
-        },
+        State = { Enabled = false, FastAttack = false, BringMob = false, AutoFarm = false, IsBusy = false },
         Config = {
-            Hub = Vector3.new(-5024, 315, -3156),
-            Speed = 300,
-            AttackDelay = 0.12,
-            MobRadius = 250,
-            MaxItemDist = 3000 -- Fix 2: Safety distance for items
+            Hubs = { [2753915549] = Vector3.new(-5024, 315, -3156), [444224521] = Vector3.new(0, 100, 0) },
+            Items = { [2753915549] = "God's Chalice", [444224521] = "Fist of Darkness" },
+            MaxTeleportDist = 3500,
+            HitboxRange = 65,
+            AttackCooldown = 0.12 -- Fix 2: Cooldown constant
         },
         Cache = { Mobs = {} },
         UI = {}
@@ -22,171 +21,159 @@
 
     local Services = setmetatable({}, {__index = function(_, k) return game:GetService(k) end})
     local LP = Services.Players.LocalPlayer
+    local TargetItemName = GG.Config.Items[game.PlaceId] or "Common Treasure"
+    local ReturnHub = GG.Config.Hubs[game.PlaceId] or Vector3.new(0, 50, 0)
+    local LastAttackTick = 0 -- Fix 2: State variable
 
-    -- 1. CHARACTER UTILS
-    local function getSafeRoot()
+    local function getRoot()
         local char = LP.Character
-        local hum = char and char:FindFirstChildOfClass("Humanoid")
-        return (hum and hum.Health > 0 and char:FindFirstChild("HumanoidRootPart")) or nil
+        if char then
+            local hum = char:FindFirstChildOfClass("Humanoid")
+            local hrp = char:FindFirstChild("HumanoidRootPart")
+            if hum and hrp and hum.Health > 0 then return hrp end
+        end
+        return nil
     end
 
-    -- 2. DYNAMIC MOB BRINGING (Fix 3: Implementation & Collision Reset)
+    local function updateStatus(txt, color)
+        if GG.UI.StatusLabel then
+            GG.UI.StatusLabel.Text = "STATUS: " .. tostring(txt):upper()
+            GG.UI.StatusLabel.TextColor3 = color or Color3.new(1, 1, 1)
+        end
+    end
+
+    -- 1. SMART CACHE REFRESH (Fix 1)
     task.spawn(function()
-        local lastScan = 0
-        while task.wait(0.1) do
-            local root = getSafeRoot()
-            if not root then continue end
-
-            if GG.State.Enabled and GG.State.BringMob then
-                if tick() - lastScan > 1.5 then
-                    GG.Cache.Mobs = {}
-                    for _, v in pairs(workspace.Enemies:GetChildren()) do
-                        if v:FindFirstChild("HumanoidRootPart") then table.insert(GG.Cache.Mobs, v) end
-                    end
-                    lastScan = tick()
-                end
-
-                for _, mob in pairs(GG.Cache.Mobs) do
-                    local mRoot = mob:FindFirstChild("HumanoidRootPart")
-                    if mob.Parent and mRoot then
-                        local dist = (mRoot.Position - root.Position).Magnitude
-                        if dist < GG.Config.MobRadius then
-                            mRoot.CFrame = root.CFrame * CFrame.new(0, -2, -5)
-                            mRoot.CanCollide = false
+        while task.wait(1) do
+            -- Fix 1: Only refresh if combat features are ON
+            if GG.State.Enabled and (GG.State.AutoFarm or GG.State.BringMob or GG.State.FastAttack) then
+                pcall(function()
+                    local root = getRoot()
+                    local folder = workspace:FindFirstChild("Enemies") or workspace:FindFirstChild("NPCs")
+                    local temp = {}
+                    if folder and root then
+                        for _, v in pairs(folder:GetChildren()) do
+                            local hum = v:FindFirstChildOfClass("Humanoid")
+                            local mRoot = v:FindFirstChild("HumanoidRootPart")
+                            if hum and mRoot and hum.Health > 0 then
+                                table.insert(temp, v)
+                            end
                         end
+                        table.sort(temp, function(a, b)
+                            return (a.HumanoidRootPart.Position - root.Position).Magnitude < (b.HumanoidRootPart.Position - root.Position).Magnitude
+                        end)
                     end
-                end
+                    GG.Cache.Mobs = temp
+                end)
             else
-                -- Fix 3: Global Cleanup when disabled
-                if #GG.Cache.Mobs > 0 then
-                    for _, mob in pairs(GG.Cache.Mobs) do
-                        if mob.Parent and mob:FindFirstChild("HumanoidRootPart") then
-                            mob.HumanoidRootPart.CanCollide = true
-                        end
-                    end
-                    GG.Cache.Mobs = {}
-                end
+                GG.Cache.Mobs = {} -- Clear cache when idle
             end
         end
     end)
 
-    -- 3. SMART AUTO-FARM (Fix 1: Dynamic Height)
+    -- 2. MAIN SCHEDULER
     task.spawn(function()
-        while task.wait(0.1) do
-            if GG.State.AutoFarmLevel and not GG.State.IsBusy then
-                local root = getSafeRoot()
+        while task.wait(0.05) do -- High frequency check
+            if GG.State.Enabled and not GG.State.IsBusy then
+                local root = getRoot()
                 if root then
-                    local closest = nil
-                    local minDist = math.huge
-                    for _, v in pairs(workspace.Enemies:GetChildren()) do
-                        local eRoot = v:FindFirstChild("HumanoidRootPart")
-                        local hum = v:FindFirstChildOfClass("Humanoid")
-                        if eRoot and hum and hum.Health > 0 then
-                            local d = (eRoot.Position - root.Position).Magnitude
-                            if d < minDist then minDist = d; closest = eRoot end
+                    -- MOB BRINGING & COLLISION RESET (Fix 3)
+                    if GG.State.BringMob then
+                        for i = 1, #GG.Cache.Mobs do
+                            local m = GG.Cache.Mobs[i]
+                            if m and m:FindFirstChild("HumanoidRootPart") then
+                                m.HumanoidRootPart.CFrame = root.CFrame * CFrame.new(0, 0, -5)
+                                if m.HumanoidRootPart.CanCollide then m.HumanoidRootPart.CanCollide = false end
+                            end
+                        end
+                    else
+                        -- Fix 3: Automatic Reset when BringMob is OFF
+                        for i = 1, #GG.Cache.Mobs do
+                            local m = GG.Cache.Mobs[i]
+                            if m and m:FindFirstChild("HumanoidRootPart") and not m.HumanoidRootPart.CanCollide then
+                                m.HumanoidRootPart.CanCollide = true
+                            end
                         end
                     end
-                    
-                    if closest then
-                        -- Fix 1: Dynamic Height Logic
-                        local optimalHeight = math.min(math.max(minDist/10, 15), 30)
-                        root.CFrame = closest.CFrame * CFrame.new(0, optimalHeight, 0)
+
+                    -- FAST ATTACK WITH COOLDOWN (Fix 2)
+                    if GG.State.FastAttack and (tick() - LastAttackTick) >= GG.Config.AttackCooldown then
+                        local targets = {}
+                        for i = 1, #GG.Cache.Mobs do
+                            local m = GG.Cache.Mobs[i]
+                            if m and m:FindFirstChild("HumanoidRootPart") and (m.HumanoidRootPart.Position - root.Position).Magnitude <= GG.Config.HitboxRange then
+                                table.insert(targets, m)
+                            end
+                        end
+                        if #targets > 0 then
+                            local re = Services.ReplicatedStorage:FindFirstChild("RigControllerEvent")
+                            if re then 
+                                re:FireServer("hit", targets, 2, "") 
+                                LastAttackTick = tick() -- Fix 2: Set last attack
+                            end
+                        end
+                    end
+
+                    -- AUTO FARM
+                    if GG.State.AutoFarm and #GG.Cache.Mobs > 0 then
+                        root.CFrame = GG.Cache.Mobs[1].HumanoidRootPart.CFrame * CFrame.new(0, 25, 0)
                     end
                 end
             end
         end
     end)
 
-    -- 4. ITEM WATCHER (Fix 2: Distance Check)
+    -- 3. ITEM COLLECTION (Same as V31)
     workspace.DescendantAdded:Connect(function(child)
-        if not GG.State.Enabled or GG.State.IsBusy then return end
-        if child.Name == GG.State.TargetItem then
-            local root = getSafeRoot()
-            local handle = child:WaitForChild("Handle", 5) or (child:IsA("BasePart") and child)
-            if root and handle then
-                -- Fix 2: Safety Validation
-                local dist = (root.Position - handle.Position).Magnitude
-                if dist < GG.Config.MaxItemDist then
-                    GG.State.IsBusy = true
-                    root.CFrame = handle.CFrame
-                    task.wait(0.2)
-                    firetouchinterest(root, handle, 0)
-                    task.wait(0.1)
-                    firetouchinterest(root, handle, 1)
-                    task.wait(0.5)
-                    root.CFrame = CFrame.new(GG.Config.Hub)
-                    GG.State.IsBusy = false
-                else
-                    warn("TARGET BLOCKED: Item beyond safe distance (" .. math.floor(dist) .. " studs)")
-                end
-            end
-        end
-    end)
-
-    -- 5. FAST ATTACK ENGINE
-    task.spawn(function()
-        local lastAttack = 0
-        while true do
-            Services.RunService.Heartbeat:Wait()
-            if GG.State.Enabled and GG.State.FastAttack and (tick() - lastAttack) >= GG.Config.AttackDelay then
-                local root = getSafeRoot()
-                if not root then continue end
-                
-                local targets = {}
-                for _, enemy in pairs(workspace.Enemies:GetChildren()) do
-                    local eRoot = enemy:FindFirstChild("HumanoidRootPart")
-                    if eRoot and (eRoot.Position - root.Position).Magnitude < 70 then
-                        table.insert(targets, enemy)
+        if GG.State.Enabled and not GG.State.IsBusy and child.Name == TargetItemName then
+            pcall(function()
+                local handle = child:FindFirstChild("Handle") or (child:IsA("BasePart") and child)
+                local root = getRoot()
+                if handle and root then
+                    if (root.Position - handle.Position).Magnitude <= GG.Config.MaxTeleportDist then
+                        GG.State.IsBusy = true
+                        updateStatus("COLLECTING " .. child.Name, Color3.new(1, 0.6, 0))
+                        root.CFrame = handle.CFrame
+                        for i = 1, 5 do
+                            firetouchinterest(root, handle, 0); firetouchinterest(root, handle, 1)
+                            task.wait(0.2)
+                            if child.Parent == LP.Character or child.Parent == LP.Backpack then break end
+                        end
+                        task.wait(0.5); root.CFrame = CFrame.new(ReturnHub)
+                        GG.State.IsBusy = false; updateStatus("READY", Color3.new(0, 1, 0.5))
                     end
                 end
-
-                if #targets > 0 then
-                    local rigEvent = Services.ReplicatedStorage:FindFirstChild("RigControllerEvent")
-                    if rigEvent then
-                        rigEvent:FireServer("hit", targets, 2, "")
-                        lastAttack = tick()
-                    end
-                end
-            end
-        end
-    end)
-
-    -- UI (Standard Build)
-    local function buildUI()
-        local sg = Instance.new("ScreenGui", Services.CoreGui)
-        local main = Instance.new("Frame", sg)
-        main.Size = UDim2.new(0, 300, 0, 320)
-        main.Position = UDim2.new(0.5, -150, 0.5, -160)
-        main.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
-        main.Active = true; main.Draggable = true
-        Instance.new("UICorner", main)
-
-        local status = Instance.new("TextLabel", main)
-        status.Size = UDim2.new(1, 0, 0, 40)
-        status.Text = "GG HUB v26"
-        status.TextColor3 = Color3.new(1, 1, 1)
-        status.BackgroundTransparency = 1
-        GG.UI.StatusLabel = status
-
-        local function createBtn(name, y, stateKey)
-            local b = Instance.new("TextButton", main)
-            b.Size = UDim2.new(0.8, 0, 0, 35)
-            b.Position = UDim2.new(0.1, 0, 0, y)
-            b.Text = name
-            b.BackgroundColor3 = Color3.fromRGB(35, 35, 35)
-            b.TextColor3 = Color3.new(1, 1, 1)
-            Instance.new("UICorner", b)
-            b.MouseButton1Click:Connect(function()
-                GG.State[stateKey] = not GG.State[stateKey]
-                b.BackgroundColor3 = GG.State[stateKey] and Color3.fromRGB(0, 150, 255) or Color3.fromRGB(35, 35, 35)
             end)
         end
+    end)
 
-        createBtn("MASTER TOGGLE", 60, "Enabled")
-        createBtn("AUTO FARM LEVEL", 110, "AutoFarmLevel")
-        createBtn("FAST ATTACK", 160, "FastAttack")
-        createBtn("BRING MOBS", 210, "BringMob")
+    -- 4. UI (Responsive)
+    local sg = Instance.new("ScreenGui", Services.CoreGui); sg.Name = "GG_HUB_V32"
+    local main = Instance.new("Frame", sg)
+    main.Size = UDim2.new(0, 300, 0, 350); main.Position = UDim2.new(0.5, -150, 0.5, -175)
+    main.BackgroundColor3 = Color3.fromRGB(20, 20, 20); main.Active = true; main.Draggable = true
+    Instance.new("UICorner", main)
+
+    local status = Instance.new("TextLabel", main)
+    status.Size = UDim2.new(1, 0, 0, 50); status.Text = "STATUS: READY"
+    status.TextColor3 = Color3.new(0, 1, 0.5); status.BackgroundColor3 = Color3.fromRGB(15, 15, 15)
+    status.Font = Enum.Font.GothamBold; GG.UI.StatusLabel = status
+
+    local function createBtn(name, state, y)
+        local b = Instance.new("TextButton", main)
+        b.Size = UDim2.new(0.8, 0, 0, 40); b.Position = UDim2.new(0.1, 0, 0, y)
+        b.Text = name; b.BackgroundColor3 = Color3.fromRGB(40, 40, 40); b.TextColor3 = Color3.new(1,1,1)
+        Instance.new("UICorner", b)
+        b.MouseButton1Click:Connect(function()
+            if not GG.State.IsBusy then
+                GG.State[state] = not GG.State[state]
+                b.BackgroundColor3 = GG.State[state] and Color3.fromRGB(0, 150, 255) or Color3.fromRGB(40, 40, 40)
+            end
+        end)
     end
 
-    buildUI()
+    createBtn("MASTER TOGGLE", "Enabled", 60)
+    createBtn("AUTO FARM", "AutoFarm", 110)
+    createBtn("FAST ATTACK", "FastAttack", 160)
+    createBtn("BRING MOBS", "BringMob", 210)
 end)()
